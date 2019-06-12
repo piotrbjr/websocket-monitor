@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="">
+    <meta name="author" content="">
+
+	<!-- jQuery Version 1.11.1 -->
+    <script src="static/js/jquery.js"></script>
+
+    <!-- Bootstrap Core JavaScript -->
+    <script src="static/js/bootstrap.js"></script>
+	
+	<script src="static/js/jquery.flot.js"></script>
+	<script src="static/js/jquery.flot.time.js"></script>
+	
+    <title>Monitor</title>
+
+    <!-- Bootstrap Core CSS -->
+    <link href="static/css/bootstrap.css" rel="stylesheet">
+
+    <!-- Custom CSS -->
+    <style>
+    body {
+        padding-top: 10px;
+    }
+    </style>
+
+</head>
+
+<body>
+
+    <!-- Page Content -->
+    <div class="container">
+
+        <div class="row">
+            <div class="col-lg-12 text-center">
+                <div class="row">
+					<button type="button" id="cpuToggle" class="btn btn-lg btn-danger">CPU</button>
+					<button type="button" id="memoryToggle" class="btn btn-lg btn-danger">Memory</button>
+					<button type="button" id="diskToggle" class="btn btn-lg btn-danger">Disk</button>
+				</div>
+				<div class="row" id="cpuContainer">
+					<div class="panel panel-default">
+						<div class="panel-heading">
+							<h3 class="panel-title">CPU</h3>
+						</div>
+						<div id="cpu_info" class="panel-body" style="height: 200px">
+						</div>
+					</div>
+				</div>
+				<div class="row" id="ramContainer">
+					<div class="panel panel-default">
+						<div class="panel-heading">
+							<h3 class="panel-title">Memory</h3>
+						</div>
+						<div id="ram_info" class="panel-body" style="height: 200px" >
+						</div>
+					</div>
+				</div>
+				<div class="row" id="diskContainer">
+					<div class="panel panel-default">
+						<div class="panel-heading">
+							<h3 class="panel-title">Disk</h3>
+						</div>
+						<div id="disk_info" class="panel-body">
+						</div>
+					</div>
+				</div>
+			</div>	
+        </div>
+        <!-- /.row -->
+
+    </div>
+    <!-- /.container -->
+	
+	<script>
+	
+	var fetchingCPU = false;
+	var fetchingMemory = false;
+	var fetchingDisk = false;
+	
+	$("#cpuContainer").hide();
+	$("#ramContainer").hide();
+	$("#diskContainer").hide();
+	
+	var cpuInitialized = new Set();
+	var cpuData = [[]];
+	
+	var vmemInitialized = false;
+	var vmemStat = [];
+	    
+	var options = {
+		lines: {
+			show: true,
+			fill: true
+		},
+		points: {
+			show: false
+		},
+		xaxis: {
+			show: false
+		},
+		yaxis: {
+			min: 0,
+			max: 110
+		},
+		legend: {
+			show: true
+		},
+		margin: {
+			top: 8,
+			bottom: 20,
+			left: 20
+		},
+		grid: {
+			borderWidth: 1,
+			minBorderMargin: 20,
+			labelMargin: 10,
+
+			margin: {
+				top: 8,
+				bottom: 20,
+				left: 20
+			}
+		}
+	}
+		
+	function deserialize(buffer)
+	{
+		var dataView = new DataView(buffer);
+		
+		var msg_type = dataView.getUint8(0);
+		var msg_id = dataView.getUint8(1);
+		console.log("Message Type: ", msg_type);
+		console.log("Message Id: ", msg_id);
+		
+		if(msg_type == 0x01)
+			console.log("ACK [%d]: %d", msg_id, dataView.getUint8(2));
+		else if(msg_type == 0x02)
+		{
+			console.log("REPORT: ", msg_id)
+			
+			if(msg_id == 0x01)
+				cpu_report(buffer.slice(2))
+			else if(msg_id == 0x02)
+				disk_report(buffer.slice(2))
+			else if(msg_id == 0x03)
+				ram_report(buffer.slice(2))
+		}
+	}
+	
+	function cpu_report(buffer)
+	{
+		var dataView = new DataView(buffer);
+		
+		var numOfCores = dataView.getUint16(0, true);
+		console.log("Number of cores: ", numOfCores);
+		
+		var cores = [];
+				
+		for(index = 0; index < numOfCores; ++index)
+		{
+			var maxReported = 100;
+		
+			if(!cpuInitialized.has(index))
+			{	
+				cpuData[index] = Array.apply(null, Array(maxReported)).map(Number.prototype.valueOf,0);
+				cpuInitialized.add(index);
+			}
+		
+			var coreUsage = (dataView.getUint16(2 + 2 * index, true) / 10);
+			
+			if(cpuData[index].length == maxReported)
+			{	
+				cpuData[index].shift();
+			}
+			cpuData[index].push(coreUsage);
+			
+			var tmpData = [];
+			for (var i = 0; i < cpuData[index].length; ++i) {
+				tmpData.push([i, cpuData[index][i]])
+			}
+			
+			cores[index] = {
+			label: "Core " + (index + 1),
+			data: tmpData
+			}
+		}
+		$.plot("#cpu_info", cores, options);
+		
+		var yaxisLabel = $("<div class='axisLabel yaxisLabel'></div>")
+			.text("Usage [%]")
+			.appendTo($("#cpu_info"));
+			
+		yaxisLabel.css("margin-top", yaxisLabel.width() / 2 - 20);
+	}
+	
+	function ascii_code_to_char(code)
+	{
+		return String.fromCharCode(code);
+	}
+	
+	function buffer_to_u64_LE(buffer)
+	{
+		var result = 0;
+		var buf2 = new Uint8Array(buffer);
+		
+		for (i=7; i+1; i--)
+		{
+			result = result * 256 + buf2[i];
+		}
+		
+		return result;
+	}
+	
+	function create_partition_div(title, div_id)
+	{
+		return $("<div class='panel panel-default'>" + 
+					"<div class='panel-heading'>" + 
+						"<h3 class='panel-title'>" + 
+							title + 
+						"</h3>" + 
+					"</div>" +
+					"<div id=" + div_id + " class='panel-body'>" + 
+					"</div>" +
+				"</div>");
+	}
+	
+	function create_progressbar_div(id, value)
+	{
+		return $("<div class='progress'>" +
+					"<div id=" + id +
+				    " class='progress-bar progress-bar-info'" +
+				    " role='progressbar'" +
+				    " aria-valuenow=" + value +
+				    " aria-valuemin='0'" +
+				    " aria-valuemax='100'" +
+				    " style='width:" + value +
+				    "%'>" +
+						value + "%" +
+					"</div>" +
+				 "</div>");
+	}
+	
+	function disk_report(buffer)
+	{
+		var dataView = new DataView(buffer);
+		var numOfPartitions = dataView.getUint16(0, true);
+		console.log("Number of partitions: ", numOfPartitions);
+		
+		var partition_info_pos = 2;
+		$("#disk_info").html("");
+		for(index = 0; index < numOfPartitions; ++index)
+		{
+			var div_id = "partition_" + (index + 1);
+			var newdiv = create_partition_div("Partition " + (index+1), div_id);
+			var device_name_len = dataView.getUint16(partition_info_pos, true);
+			var device_name_pos = partition_info_pos + 2;
+			var partition_info = "<b>Device name:</b> ";
+			
+			for(device_name_index = 0; device_name_index < device_name_len; ++device_name_index)
+			{
+				partition_info += ascii_code_to_char(dataView.getUint8(device_name_pos + device_name_index));
+			}	
+			
+			var mountpoint_len = dataView.getUint16(device_name_pos + device_name_len, true);
+			partition_info += "<br><b>Mountpoint:</b> ";
+			var mountpoint_pos = device_name_pos + device_name_len + 2;
+			
+			for(mountpoint_index = 0; mountpoint_index < mountpoint_len; ++mountpoint_index)
+			{
+				partition_info += ascii_code_to_char(dataView.getUint8(mountpoint_pos + mountpoint_index));
+			}
+			
+			var used_pos = mountpoint_pos + mountpoint_len;
+			var used = buffer_to_u64_LE(buffer.slice(used_pos, used_pos + 8));
+			var total = buffer_to_u64_LE(buffer.slice(used_pos + 8, used_pos + 16));
+			
+			partition_info += "<br><b>Usage:</b> " + used + " / " + total + " bytes<br>";
+			partition_info_pos = used_pos + 16;
+			
+			$("#disk_info").append(newdiv);
+			$("#" + div_id).html(partition_info);
+			$("#" + div_id).append(create_progressbar_div(div_id + "_progress_bar", Math.round(100 * used/total)));
+		}		
+	}
+		
+	function ram_report(buffer)
+	{
+		var used_pos = 0;
+		var used = buffer_to_u64_LE(buffer.slice(used_pos, used_pos + 8));
+		var total = buffer_to_u64_LE(buffer.slice(used_pos + 8, used_pos + 16));
+		var vmem_info = "Usage: " + used + "/" + total + " bytes (" + Math.round(100 * used/total) + "%)\n";
+		console.log(vmem_info);
+		
+		var maxReported = 100;
+		
+		if(vmemInitialized == false)
+		{	
+			vmemStat = Array.apply(null, Array(maxReported)).map(Number.prototype.valueOf,0);
+			vmemInitialized = true;
+		}
+		
+		if(vmemStat.length == maxReported)
+		{	
+			vmemStat.shift();
+		}
+		vmemStat.push(Math.round(100 * used/total));
+		
+		var tmpData = [];
+		for (var i = 0; i < vmemStat.length; ++i) {
+			tmpData.push([i, vmemStat[i]])
+		}
+		
+		$.plot("#ram_info", [tmpData], options);
+		
+		var yaxisLabel = $("<div class='axisLabel yaxisLabel'></div>")
+			.text("Usage [%]")
+			.appendTo($("#ram_info"));
+			
+		yaxisLabel.css("margin-top", yaxisLabel.width() / 2 - 20);
+		
+		var currentStat = $("<div></div>")
+			.html("<b>Current: " + used + " / " + total + " bytes</b>")
+			.appendTo($("#ram_info"));
+	}
+	
+	 try {
+        var host = "ws://" + window.location.hostname + ":9090/ws";
+        console.log("Host:", host);
+        var s = new WebSocket(host);
+		
+        s.onopen = function (e) {
+            console.log("Socket opened.");
+        };
+        s.onclose = function (e) {
+            console.log("Socket closed.");
+        };
+        s.onmessage = function (e) {
+            console.log("Socket message:", e.data);
+			
+			var reader = new FileReader();
+			var dataString = "";
+			
+			reader.onload = function(){
+				var arrayBuffer = reader.result;
+				var dataView = new DataView(arrayBuffer);
+				
+				for (index = 0; index < arrayBuffer.byteLength; ++index) 
+				{
+					dataString += "0x" + dataView.getUint8(index).toString(16) + " ";
+				}
+				console.log(dataString);
+				deserialize(arrayBuffer);
+			}
+			reader.readAsArrayBuffer(e.data)
+        };
+        s.onerror = function (e) {
+            console.log("Socket error:", e);
+        };
+    } catch (ex) {
+        console.log("Socket exception:", ex);
+    }
+
+	var buffer = new ArrayBuffer(3);
+	var view = new Uint8Array(buffer);
+	
+	$("#cpuToggle").click(function () {
+		$("#cpu_info").html("");
+		if(fetchingCPU)
+		{
+			view[0] = 0x00;
+			view[1] = 0x01;
+			view[2] = 0x00;
+			s.send(buffer);
+			$("#cpuToggle").removeClass('btn-success');
+			$("#cpuToggle").addClass('btn-danger');
+			$("#cpuContainer").hide();
+		}
+		else 
+		{
+			view[0] = 0x00;
+			view[1] = 0x01;
+			view[2] = 0x01;
+			s.send(buffer);
+			$("#cpuToggle").removeClass('btn-danger');
+			$("#cpuToggle").addClass('btn-success');
+			$("#cpuContainer").show();
+		}	
+		fetchingCPU = !fetchingCPU;
+		cpuInitialized.clear();
+		cpuData = [[]];
+	});
+
+	$("#diskToggle").click(function () {
+	
+		$("#disk_info").html("");
+	
+		if(fetchingDisk)
+		{
+			view[0] = 0x00;
+			view[1] = 0x02;
+			view[2] = 0x00;
+			s.send(buffer);
+			$("#diskToggle").removeClass('btn-success');
+			$("#diskToggle").addClass('btn-danger');
+			$("#diskContainer").hide();
+		}
+		else 
+		{
+			view[0] = 0x00;
+			view[1] = 0x02;
+			view[2] = 0x01;
+			s.send(buffer);
+			$("#diskToggle").removeClass('btn-danger');
+			$("#diskToggle").addClass('btn-success');
+			$("#diskContainer").show();
+		}	
+		fetchingDisk = !fetchingDisk;
+		
+	});
+
+	$("#memoryToggle").click(function () {
+	
+		$("#ram_info").html("");
+		
+		if(fetchingMemory)
+		{
+			view[0] = 0x00;
+			view[1] = 0x03;
+			view[2] = 0x00;
+			s.send(buffer);
+			$("#memoryToggle").removeClass('btn-success');
+			$("#memoryToggle").addClass('btn-danger');
+			$("#ramContainer").hide();
+		}
+		else 
+		{
+			view[0] = 0x00;
+			view[1] = 0x03;
+			view[2] = 0x01;
+			s.send(buffer);
+			$("#memoryToggle").removeClass('btn-danger');
+			$("#memoryToggle").addClass('btn-success');
+			$("#ramContainer").show();
+		}	
+		fetchingMemory = !fetchingMemory;
+		
+		vmemInitialized = false;
+		vmemStat = [];
+	});
+</script>
+	
+</body>
+
+</html>
